@@ -27,5 +27,6 @@ namespace GameWorld.Core.Components.Rendering
     public interface IRenderItem
     {
         void Draw(GraphicsDevice device, CommonShaderParameters parameters, RenderingTechnique renderingTechnique);
+        bool SupportsTechnique(RenderingTechnique technique) => false;
     }
 }

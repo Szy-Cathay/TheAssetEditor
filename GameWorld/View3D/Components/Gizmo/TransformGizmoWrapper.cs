@@ -2,6 +2,7 @@
 using GameWorld.Core.Commands.Bone;
 using GameWorld.Core.Commands.Vertex;
 using GameWorld.Core.Components.Selection;
+using GameWorld.Core.Rendering;
 using GameWorld.Core.Rendering.Geometry;
 using GameWorld.Core.SceneNodes;
 using GameWorld.Core.Services;
@@ -38,11 +39,8 @@ namespace GameWorld.Core.Components.Gizmo
         bool _invertedWindingOrder = false;
 
         // -- Modal transform state backup (like Blender's TransData.iloc) -- //
-        private List<List<Vector3>> _backupVertexPositions;
-        private List<List<Vector3>> _backupNormals;      // Backup normals to prevent lighting flicker
-        private List<List<Vector3>> _backupTangents;     // Backup tangents
-        private List<List<Vector3>> _backupBiNormals;    // Backup bi-normals
-        private List<List<int>> _backupIndexBuffers;
+        private List<VertexPositionNormalTextureCustom[]> _backupVertexArrays;
+        private List<ushort[]> _backupIndexArrays;
         private Vector3 _backupPosition;                 // Backup initial position for rotation center
         private Quaternion _backupOrientation;           // Backup initial orientation
         private bool _hasBackup = false;
@@ -301,8 +299,30 @@ namespace GameWorld.Core.Components.Gizmo
 
                 if (_selectionState is ObjectSelectionState objectSelectionState)
                 {
-                    for (var i = 0; i < geo.VertexCount(); i++)
-                        TransformVertex(transform, geo, objCenter, i);
+                    // Pre-compute combined transform and normal matrix once for all vertices
+                    var combinedTransform = Matrix.CreateTranslation(-objCenter) * transform * Matrix.CreateTranslation(objCenter);
+                    var vertexCount = geo.VertexCount();
+
+                    if (gizmoMode == GizmoMode.Translate)
+                    {
+                        // Translation doesn't change normals — skip TransformNormal + Normalize
+                        for (var i = 0; i < vertexCount; i++)
+                            geo.TransformVertexTranslation(i, combinedTransform);
+                    }
+                    else if (gizmoMode == GizmoMode.Rotate)
+                    {
+                        // Rotation normal matrix is orthogonal — skip Normalize (3x sqrt per vertex)
+                        var normalMatrix = Matrix.Transpose(Matrix.Invert(combinedTransform));
+                        for (var i = 0; i < vertexCount; i++)
+                            geo.TransformVertexRotation(i, combinedTransform, normalMatrix);
+                    }
+                    else
+                    {
+                        // Scale needs full processing with Normalize
+                        var normalMatrix = Matrix.Transpose(Matrix.Invert(combinedTransform));
+                        for (var i = 0; i < vertexCount; i++)
+                            geo.TransformVertex(i, combinedTransform, normalMatrix);
+                    }
                 }
                 else if (_selectionState is VertexSelectionState vertSelectionState)
                 {
@@ -337,7 +357,8 @@ namespace GameWorld.Core.Components.Gizmo
         void TransformVertex(Matrix transform, MeshObject geo, Vector3 objCenter, int index)
         {
             var m = Matrix.CreateTranslation(-objCenter) * transform * Matrix.CreateTranslation(objCenter);
-            geo.TransformVertex(index, m);
+            var normalMatrix = Matrix.Transpose(Matrix.Invert(m));
+            geo.TransformVertex(index, m, normalMatrix);
         }
 
         public Vector3 GetObjectCentre()
@@ -356,36 +377,23 @@ namespace GameWorld.Core.Components.Gizmo
             if (_effectedObjects == null || _effectedObjects.Count == 0)
                 return;
 
-            _backupVertexPositions = new List<List<Vector3>>();
-            _backupNormals = new List<List<Vector3>>();
-            _backupTangents = new List<List<Vector3>>();
-            _backupBiNormals = new List<List<Vector3>>();
-            _backupIndexBuffers = new List<List<int>>();
+            _backupVertexArrays = new List<VertexPositionNormalTextureCustom[]>();
+            _backupIndexArrays = new List<ushort[]>();
 
             foreach (var mesh in _effectedObjects)
             {
-                var positions = new List<Vector3>();
-                var normals = new List<Vector3>();
-                var tangents = new List<Vector3>();
-                var biNormals = new List<Vector3>();
+                // Single Array.Copy instead of 4 separate element-by-element lists
+                var backup = new VertexPositionNormalTextureCustom[mesh.VertexCount()];
+                Array.Copy(mesh.VertexArray, backup, mesh.VertexCount());
+                _backupVertexArrays.Add(backup);
 
-                for (int i = 0; i < mesh.VertexCount(); i++)
-                {
-                    var vertex = mesh.GetVertexExtented(i);
-                    positions.Add(new Vector3(vertex.Position.X, vertex.Position.Y, vertex.Position.Z));
-                    normals.Add(vertex.Normal);
-                    tangents.Add(vertex.Tangent);
-                    biNormals.Add(vertex.BiNormal);
-                }
+                // Backup index array as raw ushort[]
+                var indexBackup = new ushort[mesh.IndexArray.Length];
+                Array.Copy(mesh.IndexArray, indexBackup, mesh.IndexArray.Length);
+                _backupIndexArrays.Add(indexBackup);
 
-                _backupVertexPositions.Add(positions);
-                _backupNormals.Add(normals);
-                _backupTangents.Add(tangents);
-                _backupBiNormals.Add(biNormals);
-
-                // Convert List<ushort> to List<int> for backup
-                var indices = mesh.GetIndexBuffer().Select(x => (int)x).ToList();
-                _backupIndexBuffers.Add(indices);
+                // Defer BoundingBox rebuild during modal transform to avoid O(n) per-frame cost
+                mesh.DeferBoundingBoxRebuild = true;
             }
 
             // Backup position and orientation for rotation center
@@ -400,32 +408,28 @@ namespace GameWorld.Core.Components.Gizmo
         /// Call this when modal transform is cancelled or when recalculating from initial state
         /// </summary>
         /// <param name="resetTransform">Whether to reset internal transform state (true for cancel, false for recalculating)</param>
-        public void RestoreVertexState(bool resetTransform = true)
+        /// <param name="skipGpuUpload">If true, only restore VertexArray without uploading to GPU (used when next ApplyTransform will overwrite immediately)</param>
+        public void RestoreVertexState(bool resetTransform = true, bool skipGpuUpload = false)
         {
             if (!_hasBackup || _effectedObjects == null)
                 return;
 
-            for (int meshIndex = 0; meshIndex < _effectedObjects.Count && meshIndex < _backupVertexPositions.Count; meshIndex++)
+            for (int meshIndex = 0; meshIndex < _effectedObjects.Count && meshIndex < _backupVertexArrays.Count; meshIndex++)
             {
                 var mesh = _effectedObjects[meshIndex];
-                var positions = _backupVertexPositions[meshIndex];
-                var normals = _backupNormals[meshIndex];
-                var tangents = _backupTangents[meshIndex];
-                var biNormals = _backupBiNormals[meshIndex];
-                var indices = _backupIndexBuffers[meshIndex];
+                var backup = _backupVertexArrays[meshIndex];
 
-                for (int i = 0; i < positions.Count; i++)
+                // Single Array.Copy instead of element-by-element field assignment
+                Array.Copy(backup, mesh.VertexArray, backup.Length);
+
+                // Restore index array with Array.Copy
+                Array.Copy(_backupIndexArrays[meshIndex], mesh.IndexArray, _backupIndexArrays[meshIndex].Length);
+
+                if (!skipGpuUpload)
                 {
-                    // Restore position
-                    mesh.VertexArray[i].Position = new Vector4(positions[i], 1);
-                    // Restore normals, tangents, bi-normals to prevent lighting flicker
-                    mesh.VertexArray[i].Normal = normals[i];
-                    mesh.VertexArray[i].Tangent = tangents[i];
-                    mesh.VertexArray[i].BiNormal = biNormals[i];
+                    mesh.RebuildIndexBuffer();
+                    mesh.RebuildVertexBuffer();
                 }
-                // Convert List<int> back to List<ushort> for SetIndexBuffer
-                mesh.SetIndexBuffer(indices.Select(x => (ushort)x).ToList());
-                mesh.RebuildVertexBuffer();
             }
 
             // Reset internal state only when explicitly requested (e.g., on cancel)
@@ -444,11 +448,18 @@ namespace GameWorld.Core.Components.Gizmo
         /// </summary>
         public void ClearBackup()
         {
-            _backupVertexPositions?.Clear();
-            _backupNormals?.Clear();
-            _backupTangents?.Clear();
-            _backupBiNormals?.Clear();
-            _backupIndexBuffers?.Clear();
+            // Restore BoundingBox rebuild and rebuild once with final vertex positions
+            if (_effectedObjects != null)
+            {
+                foreach (var mesh in _effectedObjects)
+                {
+                    mesh.DeferBoundingBoxRebuild = false;
+                    mesh.BuildBoundingBox();
+                }
+            }
+
+            _backupVertexArrays?.Clear();
+            _backupIndexArrays?.Clear();
             _hasBackup = false;
         }
 

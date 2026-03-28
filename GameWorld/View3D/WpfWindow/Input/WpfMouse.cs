@@ -26,6 +26,11 @@ namespace GameWorld.Core.WpfWindow.Input
         private MouseState _mouseState;
         private bool _captureMouseWithin = true;
 
+        // Cache window Z-order enumeration (expensive P/Invoke + VisualTree per mouse move)
+        private List<Window> _cachedWindowOrder;
+        private DateTime _windowOrderCacheTime;
+        private static readonly TimeSpan _windowOrderCacheDuration = TimeSpan.FromMilliseconds(500);
+
         /// <summary>
         /// Creates a new instance of the mouse helper.
         /// </summary>
@@ -81,9 +86,15 @@ namespace GameWorld.Core.WpfWindow.Input
                 return;
 
             // Detect if there is a window that is on top of the main application. If so, we dont want to capture the mouse
-            // This shit is buggy and bad =(
+            // Cache the window enumeration to avoid P/Invoke + VisualTree on every mouse move
             GetCursorPos(out var p);
-            var topToBottom = SortWindowsTopToBottom(Application.Current.Windows.OfType<Window>()).ToList();
+            var now = DateTime.UtcNow;
+            if (_cachedWindowOrder == null || (now - _windowOrderCacheTime) > _windowOrderCacheDuration)
+            {
+                _cachedWindowOrder = SortWindowsTopToBottom(Application.Current.Windows.OfType<Window>()).ToList();
+                _windowOrderCacheTime = now;
+            }
+            var topToBottom = _cachedWindowOrder;
             foreach (var window in topToBottom)
             {
                 var hitPoint = window.PointFromScreen(new Point() { X = p.X, Y = p.Y });

@@ -11,6 +11,14 @@ namespace GameWorld.Core.Utility
     {
         public static float? IntersectObject(Ray ray, MeshObject geometry, Matrix matrix)
         {
+            // BoundingBox pre-check: skip expensive per-triangle test if ray misses the whole mesh
+            var inverseTransform = Matrix.Invert(matrix);
+            var localRay = new Ray(
+                Vector3.Transform(ray.Position, inverseTransform),
+                Vector3.TransformNormal(ray.Direction, inverseTransform));
+            if (localRay.Intersects(geometry.BoundingBox) == null)
+                return null;
+
             var res = IntersectFace(ray, geometry, matrix, out var _);
             return res;
         }
@@ -22,16 +30,17 @@ namespace GameWorld.Core.Utility
             ray.Direction = Vector3.TransformNormal(ray.Direction, inverseTransform);
             cameraPos = Vector3.Transform(cameraPos, inverseTransform);
 
-            var vertexList = geometry.GetVertexList();
             var bestDistance = float.MaxValue;
             selectedVertex = -1;
-            for (var i = 0; i < vertexList.Count; i++)
+            // Access VertexArray directly to avoid GetVertexList() allocation
+            for (var i = 0; i < geometry.VertexArray.Length; i++)
             {
-                var distance = (cameraPos - vertexList[i]).Length();
+                var vertexPos = geometry.GetVertexById(i);
+                var distance = (cameraPos - vertexPos).Length();
                 var distanceScale = 0.0025f * distance * 1.5f;
 
-                var bb = new BoundingBox(new Vector3(distanceScale * -0.5f) + vertexList[i], new Vector3(distanceScale * 0.5f) + vertexList[i]);
-                var res = bb.Intersects(ray); ;
+                var bb = new BoundingBox(new Vector3(distanceScale * -0.5f) + vertexPos, new Vector3(distanceScale * 0.5f) + vertexPos);
+                var res = bb.Intersects(ray);
                 if (res != null)
                 {
                     var dist = res.Value;
@@ -56,6 +65,10 @@ namespace GameWorld.Core.Utility
             var inverseTransform = Matrix.Invert(matrix);
             ray.Position = Vector3.Transform(ray.Position, inverseTransform);
             ray.Direction = Vector3.TransformNormal(ray.Direction, inverseTransform);
+
+            // BoundingBox pre-check: skip O(n) triangle test if ray misses the whole mesh
+            if (ray.Intersects(geometry.BoundingBox) == null)
+                return null;
 
             var faceIndex = -1;
             var bestDistance = float.MaxValue;
@@ -90,6 +103,12 @@ namespace GameWorld.Core.Utility
 
         public static bool IntersectObject(BoundingFrustum boundingFrustum, MeshObject geometry, Matrix matrix)
         {
+            // BoundingBox pre-check: transform mesh bounds to world space and test against frustum
+            var transformedBox = TransformBoundingBox(geometry.BoundingBox, matrix);
+            if (boundingFrustum.Contains(transformedBox) == ContainmentType.Disjoint)
+                return false;
+
+            // Detailed vertex check for meshes whose BoundingBox intersects the frustum
             for (var i = 0; i < geometry.VertexCount(); i++)
             {
                 if (boundingFrustum.Contains(Vector3.Transform(geometry.GetVertexById(i), matrix)) != ContainmentType.Disjoint)
@@ -103,28 +122,33 @@ namespace GameWorld.Core.Utility
         {
             faces = new List<int>();
 
-            var indexList = geometry.GetIndexBuffer();
-            var vertList = geometry.GetVertexList();
+            // BoundingBox pre-check
+            var transformedBox = TransformBoundingBox(geometry.BoundingBox, matrix);
+            if (boundingFrustum.Contains(transformedBox) == ContainmentType.Disjoint)
+                return false;
 
-            var transformedVertList = new Vector3[vertList.Count];
-            for (var i = 0; i < vertList.Count; i++)
-                transformedVertList[i] = Vector3.Transform(vertList[i], matrix);
+            // Transform vertices directly from VertexArray to avoid GetVertexList() allocation
+            var vertCount = geometry.VertexArray.Length;
+            var transformedVerts = new Vector3[vertCount];
+            for (var i = 0; i < vertCount; i++)
+                transformedVerts[i] = Vector3.Transform(geometry.GetVertexById(i), matrix);
 
-            for (var i = 0; i < indexList.Count; i += 3)
+            // Use IndexArray directly to avoid GetIndexBuffer() allocation
+            for (var i = 0; i < geometry.IndexArray.Length; i += 3)
             {
-                var index0 = indexList[i + 0];
-                var index1 = indexList[i + 1];
-                var index2 = indexList[i + 2];
+                var index0 = geometry.IndexArray[i + 0];
+                var index1 = geometry.IndexArray[i + 1];
+                var index2 = geometry.IndexArray[i + 2];
 
-                if (boundingFrustum.Contains(transformedVertList[index0]) != ContainmentType.Disjoint)
+                if (boundingFrustum.Contains(transformedVerts[index0]) != ContainmentType.Disjoint)
                     faces.Add(i);
-                else if (boundingFrustum.Contains(transformedVertList[index1]) != ContainmentType.Disjoint)
+                else if (boundingFrustum.Contains(transformedVerts[index1]) != ContainmentType.Disjoint)
                     faces.Add(i);
-                else if (boundingFrustum.Contains(transformedVertList[index2]) != ContainmentType.Disjoint)
+                else if (boundingFrustum.Contains(transformedVerts[index2]) != ContainmentType.Disjoint)
                     faces.Add(i);
             }
 
-            if (faces.Count() == 0)
+            if (faces.Count == 0)
                 faces = null;
             return faces != null;
         }
@@ -133,16 +157,17 @@ namespace GameWorld.Core.Utility
         {
             vertices = new List<int>();
 
-            for (var i = 0; i < geometry.GetIndexCount(); i++)
+            for (var i = 0; i < geometry.IndexArray.Length; i++)
             {
-                var index = geometry.GetIndex(i);
-
+                var index = geometry.IndexArray[i];
                 if (boundingFrustum.Contains(Vector3.Transform(geometry.GetVertexById(index), matrix)) != ContainmentType.Disjoint)
                     vertices.Add(index);
             }
-            vertices = vertices.Distinct().ToList();
-            if (vertices.Count() == 0)
+
+            if (vertices.Count == 0)
                 vertices = null;
+            else
+                vertices = vertices.Distinct().ToList();
             return vertices != null;
         }
 
@@ -233,6 +258,16 @@ namespace GameWorld.Core.Utility
             if (bones.Count() == 0)
                 bones = null;
             return bones != null;
+        }
+
+        /// <summary>
+        /// Transform a BoundingBox by a matrix (transform 8 corners, rebuild from transformed points).
+        /// </summary>
+        public static BoundingBox TransformBoundingBox(BoundingBox box, Matrix matrix)
+        {
+            var corners = box.GetCorners();
+            Vector3.Transform(corners, ref matrix, corners);
+            return BoundingBox.CreateFromPoints(corners);
         }
     }
 }

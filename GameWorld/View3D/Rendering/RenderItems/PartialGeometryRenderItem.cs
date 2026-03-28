@@ -30,14 +30,39 @@ namespace GameWorld.Core.Rendering.RenderItems
 
         void ApplyMeshPart(IShader effect, GraphicsDevice device, List<int> faceSelection, IGraphicsCardGeometry geometry)
         {
+            if (faceSelection.Count == 0)
+                return;
+
             device.Indices = geometry.IndexBuffer;
             device.SetVertexBuffer(geometry.VertexBuffer);
-            //foreach (var pass in effect.GetEffect().CurrentTechnique.Passes)
+
+            // Batch consecutive faces into single DrawIndexedPrimitives calls
+            // Each face is one triangle (primitiveCount=1), consecutive faces can be merged
+            var sortedFaces = faceSelection;
+            if (sortedFaces.Count == 1)
             {
-               // pass.Apply();
-                foreach (var item in faceSelection)
-                    device.DrawIndexedPrimitives(PrimitiveType.TriangleList, 0, item, 1);
+                device.DrawIndexedPrimitives(PrimitiveType.TriangleList, 0, sortedFaces[0], 1);
+                return;
             }
+
+            int batchStart = sortedFaces[0];
+            int batchCount = 1;
+            for (int i = 1; i < sortedFaces.Count; i++)
+            {
+                // Check if current face is adjacent to previous (3 indices apart)
+                if (sortedFaces[i] == sortedFaces[i - 1] + 3)
+                {
+                    batchCount++;
+                }
+                else
+                {
+                    device.DrawIndexedPrimitives(PrimitiveType.TriangleList, 0, batchStart, batchCount);
+                    batchStart = sortedFaces[i];
+                    batchCount = 1;
+                }
+            }
+            // Draw remaining batch
+            device.DrawIndexedPrimitives(PrimitiveType.TriangleList, 0, batchStart, batchCount);
         }
     }
 }

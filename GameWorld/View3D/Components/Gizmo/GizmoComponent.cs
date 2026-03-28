@@ -86,9 +86,9 @@ namespace GameWorld.Core.Components.Gizmo
         {
             if (_activeTransformation?.HasBackup == true)
             {
-                // Restore vertices and reset transform state
-                // The subsequent transform event will build the new total transform from scratch
-                _activeTransformation.RestoreVertexState(resetTransform: true);
+                // Restore vertices without GPU upload — the subsequent transform event
+                // will overwrite vertices and upload the final result in one pass.
+                _activeTransformation.RestoreVertexState(resetTransform: true, skipGpuUpload: true);
             }
         }
 

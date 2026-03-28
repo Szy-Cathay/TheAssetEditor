@@ -38,11 +38,13 @@ namespace GameWorld.Core.Components
 
 
         private readonly RenderEngineComponent _renderEngineComponent;
+        private readonly ArcBallCamera _camera;
         private readonly IEventHub _eventHub;
 
-        public SceneManager(RenderEngineComponent renderEngineComponent, IEventHub eventHub)
+        public SceneManager(RenderEngineComponent renderEngineComponent, ArcBallCamera camera, IEventHub eventHub)
         {
             _renderEngineComponent = renderEngineComponent;
+            _camera = camera;
             _eventHub = eventHub;
             RootNode = new GroupNode(SpecialNodes.Root) { SceneManager = this, IsEditable = true, IsLockable = false };
 
@@ -179,21 +181,56 @@ namespace GameWorld.Core.Components
 
         public override void Draw(GameTime gameTime)
         {
-            DrawBasicSceneHirarchy(RootNode, Matrix.Identity);
+            var frustum = new BoundingFrustum(_camera.ViewMatrix * _camera.ProjectionMatrix);
+            DrawBasicSceneHirarchy(RootNode, Matrix.Identity, frustum);
             base.Draw(gameTime);
         }
 
-        void DrawBasicSceneHirarchy(ISceneNode root, Matrix parentMatrix)
+        void DrawBasicSceneHirarchy(ISceneNode root, Matrix parentMatrix, BoundingFrustum frustum)
         {
             if (root.IsVisible)
             {
                 foreach (var child in root.Children)
                 {
                     if (child is IDrawableItem drawableNode && child.IsVisible)
-                        drawableNode.Render(_renderEngineComponent, parentMatrix);
-                    DrawBasicSceneHirarchy(child, parentMatrix * child.ModelMatrix);
+                    {
+                        // Frustum culling: skip meshes outside the camera view
+                        if (IsVisibleInFrustum(child, parentMatrix, frustum))
+                            drawableNode.Render(_renderEngineComponent, parentMatrix);
+                    }
+                    DrawBasicSceneHirarchy(child, parentMatrix * child.ModelMatrix, frustum);
                 }
             }
+        }
+
+        /// <summary>
+        /// Check if a scene node is visible within the camera frustum using its BoundingBox.
+        /// Returns true if the node has no BoundingBox or if BoundingBox rebuild is deferred (conservative).
+        /// </summary>
+        static bool IsVisibleInFrustum(ISceneNode node, Matrix parentMatrix, BoundingFrustum frustum)
+        {
+            if (node is IEditableGeometry geoNode && geoNode.Geometry != null)
+            {
+                var mesh = geoNode.Geometry;
+                // If BoundingBox rebuild is deferred, always render (conservative)
+                if (mesh.DeferBoundingBoxRebuild)
+                    return true;
+
+                var worldMatrix = node.ModelMatrix * parentMatrix;
+                var transformedBox = TransformBoundingBox(mesh.BoundingBox, worldMatrix);
+                return frustum.Contains(transformedBox) != ContainmentType.Disjoint;
+            }
+            return true; // No bounding box available, always render
+        }
+
+        /// <summary>
+        /// Transform a BoundingBox by a matrix (transform 8 corners, rebuild from transformed points)
+        /// </summary>
+        static BoundingBox TransformBoundingBox(BoundingBox box, Matrix matrix)
+        {
+            var corners = box.GetCorners();
+            Vector3.Transform(corners, ref matrix, corners);
+            return BoundingBox.CreateFromPoints(corners);
         }
 
         public void DumpToConsole()

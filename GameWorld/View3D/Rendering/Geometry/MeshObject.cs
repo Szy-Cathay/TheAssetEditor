@@ -17,6 +17,13 @@ namespace GameWorld.Core.Rendering.Geometry
         public BoundingBox BoundingBox { get; private set; }
         public Vector3 MeshCenter { get; private set; }
 
+        /// <summary>
+        /// When true, RebuildVertexBuffer() skips BuildBoundingBox() to avoid
+        /// per-frame O(n) vertex iteration during modal transforms.
+        /// The caller must call BuildBoundingBox() once after the transform ends.
+        /// </summary>
+        public bool DeferBoundingBoxRebuild { get; set; } = false;
+
         public int WeightCount { get => GetWeightCount(); } // reduce the use of this
         public UiVertexFormat VertexFormat { get; private set; } = UiVertexFormat.Unknown;
         public string SkeletonName { get; private set; }  // SkeletonName
@@ -101,6 +108,64 @@ namespace GameWorld.Core.Rendering.Geometry
             VertexArray[vertexId].Normal.Normalize();
             VertexArray[vertexId].BiNormal.Normalize();
             VertexArray[vertexId].Tangent.Normalize();
+        }
+
+        /// <summary>
+        /// Transform a vertex using a pre-computed normal matrix.
+        /// Use this when transforming multiple vertices with the same transform
+        /// to avoid computing Matrix.Invert + Matrix.Transpose per vertex.
+        /// </summary>
+        public void TransformVertex(int vertexId, Matrix transform, Matrix normalMatrix)
+        {
+            VertexArray[vertexId].Position = Vector4.Transform(VertexArray[vertexId].Position, transform);
+
+            VertexArray[vertexId].Position.X = VertexArray[vertexId].Position.X / VertexArray[vertexId].Position.W;
+            VertexArray[vertexId].Position.Y = VertexArray[vertexId].Position.Y / VertexArray[vertexId].Position.W;
+            VertexArray[vertexId].Position.Z = VertexArray[vertexId].Position.Z / VertexArray[vertexId].Position.W;
+            VertexArray[vertexId].Position.W = 1;
+
+            VertexArray[vertexId].Normal = Vector3.TransformNormal(VertexArray[vertexId].Normal, normalMatrix);
+            VertexArray[vertexId].BiNormal = Vector3.TransformNormal(VertexArray[vertexId].BiNormal, normalMatrix);
+            VertexArray[vertexId].Tangent = Vector3.TransformNormal(VertexArray[vertexId].Tangent, normalMatrix);
+
+            VertexArray[vertexId].Normal.Normalize();
+            VertexArray[vertexId].BiNormal.Normalize();
+            VertexArray[vertexId].Tangent.Normalize();
+        }
+
+        /// <summary>
+        /// Transform vertex position only — used for translation where normals are unchanged.
+        /// Avoids 3x TransformNormal + 3x Normalize per vertex.
+        /// </summary>
+        public void TransformVertexTranslation(int vertexId, Matrix transform)
+        {
+            VertexArray[vertexId].Position = Vector4.Transform(VertexArray[vertexId].Position, transform);
+
+            VertexArray[vertexId].Position.X = VertexArray[vertexId].Position.X / VertexArray[vertexId].Position.W;
+            VertexArray[vertexId].Position.Y = VertexArray[vertexId].Position.Y / VertexArray[vertexId].Position.W;
+            VertexArray[vertexId].Position.Z = VertexArray[vertexId].Position.Z / VertexArray[vertexId].Position.W;
+            VertexArray[vertexId].Position.W = 1;
+            // Normals unchanged for pure translation
+        }
+
+        /// <summary>
+        /// Transform vertex for rotation — normals are transformed but not normalized,
+        /// since rotation matrices are orthogonal (length-preserving).
+        /// Avoids 3x Normalize (3x sqrt) per vertex.
+        /// </summary>
+        public void TransformVertexRotation(int vertexId, Matrix transform, Matrix normalMatrix)
+        {
+            VertexArray[vertexId].Position = Vector4.Transform(VertexArray[vertexId].Position, transform);
+
+            VertexArray[vertexId].Position.X = VertexArray[vertexId].Position.X / VertexArray[vertexId].Position.W;
+            VertexArray[vertexId].Position.Y = VertexArray[vertexId].Position.Y / VertexArray[vertexId].Position.W;
+            VertexArray[vertexId].Position.Z = VertexArray[vertexId].Position.Z / VertexArray[vertexId].Position.W;
+            VertexArray[vertexId].Position.W = 1;
+
+            VertexArray[vertexId].Normal = Vector3.TransformNormal(VertexArray[vertexId].Normal, normalMatrix);
+            VertexArray[vertexId].BiNormal = Vector3.TransformNormal(VertexArray[vertexId].BiNormal, normalMatrix);
+            VertexArray[vertexId].Tangent = Vector3.TransformNormal(VertexArray[vertexId].Tangent, normalMatrix);
+            // Skip Normalize — rotation normal matrix is orthogonal, preserves length
         }
 
         public void SetVertexWeights(int index, Vector4 newWeights)
@@ -353,14 +418,14 @@ namespace GameWorld.Core.Rendering.Geometry
 
         public void RemoveUnusedVertexes(ushort[] newIndexList)
         {
-            var uniqeIndexes = newIndexList.Distinct().ToList();
-            uniqeIndexes.Sort();
+            // Use HashSet for O(1) Contains instead of List O(n)
+            var uniqueIndexSet = newIndexList.Distinct().ToHashSet();
 
             var newVertexList = new List<VertexPositionNormalTextureCustom>();
             var remappingTable = new Dictionary<ushort, ushort>();
             for (ushort i = 0; i < VertexArray.Length; i++)
             {
-                if (uniqeIndexes.Contains(i))
+                if (uniqueIndexSet.Contains(i))
                 {
                     remappingTable[i] = (ushort)remappingTable.Count();
                     newVertexList.Add(VertexArray[i]);
@@ -415,7 +480,8 @@ namespace GameWorld.Core.Rendering.Geometry
         public void RebuildVertexBuffer()
         {
             Context.RebuildVertexBuffer(VertexArray, VertexPositionNormalTextureCustom.VertexDeclaration);
-            BuildBoundingBox();
+            if (!DeferBoundingBoxRebuild)
+                BuildBoundingBox();
         }
 
         public void RebuildIndexBuffer()

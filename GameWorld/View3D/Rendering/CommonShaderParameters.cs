@@ -2,7 +2,8 @@
 
 namespace GameWorld.Core.Rendering
 {
-    public record CommonShaderParameters(
+    // record struct: stack-allocated, eliminates per-frame heap allocation
+    public readonly record struct CommonShaderParameters(
         Matrix View,
         Matrix Projection,
         Vector3 CameraPosition,

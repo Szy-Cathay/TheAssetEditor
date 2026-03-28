@@ -1,4 +1,5 @@
-﻿using CommunityToolkit.Diagnostics;
+﻿using System.Linq;
+using CommunityToolkit.Diagnostics;
 using GameWorld.Core.Components.Selection;
 using GameWorld.Core.Rendering;
 using GameWorld.Core.Services;
@@ -147,16 +148,21 @@ namespace GameWorld.Core.Components.Rendering
             device.DepthStencilState = DepthStencilState.Default;
             Render3DObjects(commonShaderParameters, RenderingTechnique.Normal);
 
-            // 3D drawing - Emissive 
-            device.SetRenderTarget(_glowRenderTarget);
-            Render3DObjects(commonShaderParameters, RenderingTechnique.Emissive);
+            // 3D drawing - Emissive (only if scene contains emissive-capable objects)
+            bool hasEmissiveItems = _renderItems[RenderBuckedId.Normal].Any(item => item.SupportsTechnique(RenderingTechnique.Emissive));
+
+            if (hasEmissiveItems)
+            {
+                device.SetRenderTarget(_glowRenderTarget);
+                Render3DObjects(commonShaderParameters, RenderingTechnique.Emissive);
+            }
 
             device.SetRenderTarget(backBufferRenderTarget);
             spriteBatch.Begin();
             spriteBatch.Draw(_defaultRenderTarget, new Rectangle(0, 0, screenWidth, screenHeight), Color.White);
             spriteBatch.End();
 
-            if (_drawGlow)
+            if (_drawGlow && hasEmissiveItems)
             {
                 // While re-sizing or changing view, there is a small chance that the
                 // bloomRenderTarget could be null

@@ -6,6 +6,29 @@ namespace Shared.Core.PackFiles.Models
     public class PackedFileSourceParent
     {
         public required string FilePath { get; set; }
+
+        private FileStream _sharedStream;
+        private readonly object _streamLock = new();
+
+        /// <summary>
+        /// Read raw bytes from the cached FileStream (thread-safe).
+        /// The stream is lazily opened and reused across calls.
+        /// </summary>
+        internal byte[] ReadFromSharedStream(long offset, int size)
+        {
+            lock (_streamLock)
+            {
+                if (_sharedStream == null || !_sharedStream.CanRead)
+                {
+                    _sharedStream?.Dispose();
+                    _sharedStream = new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                }
+                var data = new byte[size];
+                _sharedStream.Seek(offset, SeekOrigin.Begin);
+                _sharedStream.ReadExactly(data, 0, size);
+                return data;
+            }
+        }
     }
 
     public record PackedFileSource : IDataSource
@@ -38,8 +61,19 @@ namespace Shared.Core.PackFiles.Models
 
         public byte[] ReadData()
         {
-            using var stream = File.Open(Parent.FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            return ReadData(stream);
+            var data = Parent.ReadFromSharedStream(Offset, (int)Size);
+
+            if (IsEncrypted)
+                data = FileEncryption.Decrypt(data);
+
+            if (IsCompressed)
+            {
+                data = FileCompression.Decompress(data, (int)UncompressedSize, CompressionFormat);
+                if (data.Length != UncompressedSize)
+                    throw new InvalidDataException($"Decompressed bytes {data.Length:N0} does not match the expected uncompressed bytes {UncompressedSize:N0}.");
+            }
+
+            return data;
         }
 
         public byte[] ReadData(Stream knownStream)
@@ -66,31 +100,24 @@ namespace Shared.Core.PackFiles.Models
         {
             byte[] data;
 
-            using (var stream = File.Open(Parent.FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            if (!IsEncrypted && !IsCompressed)
             {
-                stream.Seek(Offset, SeekOrigin.Begin);
+                data = Parent.ReadFromSharedStream(Offset, size);
+            }
+            else
+            {
+                data = Parent.ReadFromSharedStream(Offset, (int)Size);
 
-                if (!IsEncrypted && !IsCompressed)
+                if (IsEncrypted)
+                    data = FileEncryption.Decrypt(data);
+
+                if (IsCompressed)
                 {
-                    data = new byte[size];
-                    stream.ReadExactly(data);
+                    data = FileCompression.Decompress(data, size, CompressionFormat);
+                    if (data.Length != size)
+                        throw new InvalidDataException($"Decompressed bytes {data.Length:N0} does not match the expected uncompressed bytes {size:N0}.");
                 }
-                else
-                {
-                    data = new byte[Size];
-                    stream.ReadExactly(data);
-
-                    if (IsEncrypted)
-                        data = FileEncryption.Decrypt(data);
-
-                    if (IsCompressed)
-                    {
-                        data = FileCompression.Decompress(data, size, CompressionFormat);
-                        if (data.Length != size)
-                            throw new InvalidDataException($"Decompressed bytes {data.Length:N0} does not match the expected uncompressed bytes {size:N0}.");
-                    }
-                }
-            }           
+            }
 
             return data;
         }
@@ -99,13 +126,7 @@ namespace Shared.Core.PackFiles.Models
 
         public byte[] ReadDataWithoutDecompressing()
         {
-            var data = new byte[Size];
-
-            using (var stream = File.Open(Parent.FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-            {
-                stream.Seek(Offset, SeekOrigin.Begin);
-                stream.ReadExactly(data);
-            }
+            var data = Parent.ReadFromSharedStream(Offset, (int)Size);
 
             if (IsEncrypted)
                 data = FileEncryption.Decrypt(data);

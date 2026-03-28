@@ -1,4 +1,5 @@
-﻿using GameWorld.Core.SceneNodes;
+﻿using GameWorld.Core.Rendering.Geometry;
+using GameWorld.Core.SceneNodes;
 using Microsoft.Xna.Framework;
 using System.Collections.Generic;
 using System.Linq;
@@ -49,50 +50,65 @@ namespace GameWorld.Core.Components.Selection
         public void UpdateWeights(float distanceOffset)
         {
             _selectionDistanceFallof = distanceOffset;
-            var vertexList = RenderObject.Geometry.GetVertexList();
-            var vertListLength = vertexList.Count;
+            var geo = RenderObject.Geometry;
+            var vertexArray = geo.VertexArray;  // Direct access, no allocation
+            var vertCount = vertexArray.Length;
 
-            // Clear all
-            for (var currentVertIndex = 0; currentVertIndex < vertexList.Count; currentVertIndex++)
-                VertexWeights[currentVertIndex] = 0;
+            // Build HashSet for O(1) lookup instead of List.Contains O(n)
+            var selectedSet = new HashSet<int>(SelectedVertices);
 
-            // Compute new
-            if (SelectedVertices.Count == 0 || SelectedVertices.Count == vertexList.Count || distanceOffset == 0)
+            // Clear all weights
+            for (var i = 0; i < vertCount; i++)
+                VertexWeights[i] = 0;
+
+            // Fast path: no falloff needed
+            if (SelectedVertices.Count == 0 || SelectedVertices.Count == vertCount || distanceOffset == 0)
             {
                 foreach (var vert in SelectedVertices)
                     VertexWeights[vert] = 1.0f;
+                return;
             }
-            else
+
+            // Pre-compute selected vertex positions for distance calculation
+            var selectedPositions = new Vector3[SelectedVertices.Count];
+            for (int i = 0; i < SelectedVertices.Count; i++)
             {
-                var vertsInUse = SelectedVertices.Select(x => vertexList[x]);
-                for (var currentVertIndex = 0; currentVertIndex < vertexList.Count; currentVertIndex++)
+                var pos = vertexArray[SelectedVertices[i]].Position;
+                selectedPositions[i] = new Vector3(pos.X, pos.Y, pos.Z);
+            }
+
+            // Compute weights with O(1) set lookup and direct array access
+            for (var i = 0; i < vertCount; i++)
+            {
+                if (selectedSet.Contains(i))
                 {
-                    var currentVertPos = vertexList[currentVertIndex];
-                    if (SelectedVertices.Contains(currentVertIndex))
-                    {
-                        VertexWeights[currentVertIndex] = 1.0f;
-                    }
-                    else
-                    {
-                        var dist = GetClosestVertexDist(currentVertPos, vertsInUse);
-                        if (dist <= distanceOffset)
-                            VertexWeights[currentVertIndex] = 1 - dist / distanceOffset;
-                    }
+                    VertexWeights[i] = 1.0f;
+                }
+                else
+                {
+                    var pos = vertexArray[i].Position;
+                    var currentPos = new Vector3(pos.X, pos.Y, pos.Z);
+                    var dist = GetClosestVertexDist(currentPos, selectedPositions);
+                    if (dist <= distanceOffset)
+                        VertexWeights[i] = 1 - dist / distanceOffset;
                 }
             }
         }
 
 
-        float GetClosestVertexDist(Vector3 currentPos, IEnumerable<Vector3> vertList)
+        float GetClosestVertexDist(Vector3 currentPos, Vector3[] selectedPositions)
         {
             var closest = float.MaxValue;
-            foreach (var vert in vertList)
+            for (int i = 0; i < selectedPositions.Length; i++)
             {
-                var dist = Vector3.Distance(vert, currentPos);
-                if (dist < closest)
-                    closest = dist;
+                var dx = currentPos.X - selectedPositions[i].X;
+                var dy = currentPos.Y - selectedPositions[i].Y;
+                var dz = currentPos.Z - selectedPositions[i].Z;
+                var distSq = dx * dx + dy * dy + dz * dz;
+                if (distSq < closest)
+                    closest = distSq;
             }
-            return closest;
+            return MathF.Sqrt(closest);
         }
 
         public List<int> CurrentSelection()

@@ -25,6 +25,8 @@ namespace GameWorld.Core.Rendering.RenderItems
             _modelMatrix = modelMatrix;
         }
 
+        public bool SupportsTechnique(RenderingTechnique technique) => _shader.SupportsTechnique(technique);
+
         public void Draw(GraphicsDevice device, CommonShaderParameters parameters, RenderingTechnique renderingTechnique)
         {
             if (_shader.SupportsTechnique(renderingTechnique) == false)
