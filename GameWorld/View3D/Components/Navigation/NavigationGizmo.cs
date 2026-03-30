@@ -122,7 +122,10 @@ namespace GameWorld.Core.Components.Navigation
         private List<AxisDrawData> GetAllAxisScreenPositions()
         {
             var result = new List<AxisDrawData>();
-            var rotationMatrix = Matrix.CreateFromYawPitchRoll(_camera.Yaw, _camera.Pitch, 0);
+            // Use the view matrix directly (like Blender's rv3d->viewmat).
+            // The view matrix rotation transforms world axes into camera/screen space,
+            // giving the correct screen-space projection of world X/Y/Z directions.
+            var viewMatrix = _camera.ViewMatrix;
             float scale = GIZMO_SIZE / (AXIS_LENGTH * 2);
 
             // 6 axes: +X, -X, +Y, -Y, +Z, -Z
@@ -144,12 +147,12 @@ namespace GameWorld.Core.Components.Navigation
                     _ => Vector3.Zero
                 };
 
-                // Apply sign and rotate
+                // Apply sign and transform to camera space using view matrix
                 var axisEnd = baseDir * (isPositive ? AXIS_LENGTH : -AXIS_LENGTH);
-                var rotatedAxis = Vector3.Transform(axisEnd, rotationMatrix);
+                var rotatedAxis = Vector3.TransformNormal(axisEnd, viewMatrix);
 
-                // Calculate screen position
-                var screenPos = _screenPosition + new Vector2(rotatedAxis.X, -rotatedAxis.Y) * scale;
+                // Calculate screen position (negate X to match the projection matrix's CreateScale(-1,1,1) flip)
+                var screenPos = _screenPosition + new Vector2(-rotatedAxis.X, -rotatedAxis.Y) * scale;
 
                 result.Add(new AxisDrawData
                 {
@@ -227,7 +230,8 @@ namespace GameWorld.Core.Components.Navigation
         /// </summary>
         private void DrawAxesLines(List<AxisDrawData> axisDataList)
         {
-            var rotationMatrix = Matrix.CreateFromYawPitchRoll(_camera.Yaw, _camera.Pitch, 0);
+            // Use view matrix for correct world-to-screen axis projection
+            var viewMatrix = _camera.ViewMatrix;
             float scale = GIZMO_SIZE / (AXIS_LENGTH * 2);
 
             // Draw lines for each axis pair (+/-)
@@ -258,14 +262,14 @@ namespace GameWorld.Core.Components.Navigation
 
                 // Draw positive line (from center to +endpoint)
                 var posEnd = baseDir * AXIS_LENGTH;
-                var rotatedPos = Vector3.Transform(posEnd, rotationMatrix);
-                var posScreen = _screenPosition + new Vector2(rotatedPos.X, -rotatedPos.Y) * scale;
+                var rotatedPos = Vector3.TransformNormal(posEnd, viewMatrix);
+                var posScreen = _screenPosition + new Vector2(-rotatedPos.X, -rotatedPos.Y) * scale;
                 DrawThickLine(_screenPosition, posScreen, axisColor * 0.8f, LINE_THICKNESS);
 
                 // Draw negative line (from center to -endpoint)
                 var negEnd = -baseDir * AXIS_LENGTH;
-                var rotatedNeg = Vector3.Transform(negEnd, rotationMatrix);
-                var negScreen = _screenPosition + new Vector2(rotatedNeg.X, -rotatedNeg.Y) * scale;
+                var rotatedNeg = Vector3.TransformNormal(negEnd, viewMatrix);
+                var negScreen = _screenPosition + new Vector2(-rotatedNeg.X, -rotatedNeg.Y) * scale;
                 DrawThickLine(_screenPosition, negScreen, axisColor * 0.6f, LINE_THICKNESS);
             }
         }
